@@ -4,16 +4,19 @@
  * Manages the ProPresenter Remote Control WebSocket connection and exposes
  * pushLyric(text) for autonomous slide matching.
  *
- * Matching priority:
- *   1. Search the currently active presentation's slides (fast path).
- *   2. If no match found, search the full library index and switch
- *      ProPresenter to the best-matching song before triggering the slide.
+ * 3-stage matching priority:
+ *   1. Active PP presentation slides (fastest — already loaded in memory)
+ *   2. Full PP library index (cross-song — fetched in background on connect)
+ *   3. Grace internal song corpus (persistent — survives PP restarts)
  *
  * Library indexing:
  *   On every successful connection the WS client fetches the full `prl`
- *   list, then drip-feeds `pre` requests one-at-a-time in the background.
- *   The store accumulates them in libraryIndex. Once all presentations have
- *   been fetched, libraryLoaded flips to true.
+ *   list, then drip-feeds `pre` requests in the background.
+ *
+ * Corpus indexing:
+ *   Built from useSongLibraryStore on hook mount and whenever songs change.
+ *   Uses a lower threshold (0.30) since the corpus is curated and lyrics
+ *   are clean, unlike live transcripts matched against PP slide text.
  */
 
 import { useEffect, useRef, useCallback } from "react"
@@ -22,10 +25,13 @@ import { ProPresenterWSClient } from "@/lib/propresenter-ws"
 import { useProPresenterStore } from "@/stores/propresenter-store"
 import { useSettingsStore } from "@/stores/settings-store"
 import { useTranscriptStore } from "@/stores/transcript-store"
+import { useSongLibraryStore } from "@/stores/song-library-store"
+import { buildCorpusIndex, findBestCorpusMatch } from "@/lib/song-library-db"
 import { useTauriEvent } from "./use-tauri-event"
 import type { PPSlide } from "@/stores/propresenter-store"
+import type { CorpusSlide } from "@/lib/song-library-db"
 
-// -- Lyric matching helpers --------------------------------------------------
+// -- PP slide matching helpers -----------------------------------------------
 
 function normalise(s: string): string {
   return s
@@ -49,7 +55,6 @@ interface SlideMatch {
   score: number
 }
 
-/** Find the best matching slide within a single presentation's slide list. */
 function findBestSlide(
   transcript: string,
   slides: PPSlide[],
@@ -78,10 +83,6 @@ interface LibraryMatch {
   score: number
 }
 
-/**
- * Search the entire library index for the best-matching slide across all songs.
- * Returns null if nothing clears the threshold.
- */
 function findBestLibraryMatch(
   transcript: string,
   libraryIndex: Record<string, PPSlide[]>,
@@ -117,9 +118,16 @@ export function useProPresenter() {
   const connectionStatus = useProPresenterStore((s) => s.connectionStatus)
   const slides = useProPresenterStore((s) => s.slides)
   const autoMode = useSettingsStore((s) => s.autoMode)
+  const librarySongs = useSongLibraryStore((s) => s.songs)
 
   const clientRef = useRef<ProPresenterWSClient | null>(null)
   const lastActedSegmentId = useRef<string | null>(null)
+  // Rebuild corpus index whenever songs change
+  const corpusIndexRef = useRef<CorpusSlide[]>([])
+
+  useEffect(() => {
+    corpusIndexRef.current = buildCorpusIndex(librarySongs)
+  }, [librarySongs])
 
   // -- Connection lifecycle --------------------------------------------------
 
@@ -160,20 +168,19 @@ export function useProPresenter() {
         toast.error("ProPresenter error", { description: msg, id: "pp-error" })
       },
 
-      /** Receive the full library list and register all UIDs in the store. */
       onLibraryList: (entries) => {
         store.setLibraryEntries(entries)
       },
 
-      /** Each presentation fetched during background indexing lands here. */
       onLibraryPresentation: (uid, ppSlides) => {
         store.indexPresentation(uid, ppSlides)
-        // Once every song is indexed, fire a subtle toast
         const { libraryLoaded, libraryEntries } = useProPresenterStore.getState()
         if (libraryLoaded) {
           toast.success("Library indexed", {
             id: "pp-library",
-            description: `${libraryEntries.length} song${libraryEntries.length === 1 ? "" : "s"} ready for autonomous matching`,
+            description: `${libraryEntries.length} song${
+              libraryEntries.length === 1 ? "" : "s"
+            } ready for autonomous matching`,
           })
         }
       },
@@ -205,7 +212,7 @@ export function useProPresenter() {
     }
   )
 
-  // -- Manual / programmatic push -------------------------------------------
+  // -- Push logic (3 stages) ------------------------------------------------
 
   const pushLyric = useCallback(
     (text: string) => {
@@ -221,7 +228,7 @@ export function useProPresenter() {
       const store = useProPresenterStore.getState()
       const currentSlides = store.slides
 
-      // 1. Fast path: try matching against the active presentation
+      // Stage 1: active presentation fast path
       if (currentSlides.length > 0) {
         const match = findBestSlide(text, currentSlides)
         if (match) {
@@ -231,32 +238,57 @@ export function useProPresenter() {
           return
         }
       } else {
-        // No slides loaded yet — request them and bail
         client.requestCurrentPresentation()
         toast.info("Fetching ProPresenter slides...", { id: "pp-fetching" })
         return
       }
 
-      // 2. Cross-song library search
-      const { libraryIndex, libraryEntries, libraryLoaded } = store
-
-      if (!libraryLoaded && Object.keys(libraryIndex).length === 0) {
-        // Library hasn't started indexing yet — nothing we can do
-        return
+      // Stage 2: full PP library index
+      const { libraryIndex, libraryEntries } = store
+      if (Object.keys(libraryIndex).length > 0) {
+        const libMatch = findBestLibraryMatch(text, libraryIndex, libraryEntries)
+        if (libMatch) {
+          client.switchPresentationAndTrigger(libMatch.uid, libMatch.slideIndex)
+          store.setLastPushed(text)
+          toast.info(`Switched to "${libMatch.name}"`, {
+            id: "pp-switch",
+            description: `Slide ${libMatch.slideIndex + 1} — ${Math.round(libMatch.score * 100)}% match`,
+          })
+          return
+        }
       }
 
-      const libraryMatch = findBestLibraryMatch(text, libraryIndex, libraryEntries)
+      // Stage 3: Grace internal song corpus
+      const corpusIndex = corpusIndexRef.current
+      if (corpusIndex.length === 0) return
 
-      if (!libraryMatch) return
+      const corpusMatch = findBestCorpusMatch(text, corpusIndex)
+      if (!corpusMatch) return
 
-      // Switch PP to the matching song and trigger the right slide
-      client.switchPresentationAndTrigger(libraryMatch.uid, libraryMatch.slideIndex)
-      store.setLastPushed(text)
+      // Find the PP library UID whose name most closely matches the corpus song name
+      const normCorpusName = corpusMatch.songName.toLowerCase()
+      const ppEntry = store.libraryEntries.find(
+        (e) => e.name.toLowerCase().includes(normCorpusName) ||
+               normCorpusName.includes(e.name.toLowerCase())
+      )
 
-      toast.info(`Switched to "${libraryMatch.name}"`, {
-        id: "pp-switch",
-        description: `Slide ${libraryMatch.slideIndex + 1} — ${Math.round(libraryMatch.score * 100)}% match`,
-      })
+      if (ppEntry) {
+        // We know which PP presentation this is — switch and trigger
+        client.switchPresentationAndTrigger(ppEntry.uid, corpusMatch.slideIndex)
+        store.setLastPushed(text)
+        toast.info(`Corpus match: "${corpusMatch.songName}"`, {
+          id: "pp-corpus-switch",
+          description: `${corpusMatch.label} — ${Math.round(corpusMatch.score * 100)}% match`,
+        })
+      } else {
+        // Song is in the Grace corpus but not found in PP library by name —
+        // alert the operator so they can manually load it
+        toast.warning(`Load "${corpusMatch.songName}" in ProPresenter`, {
+          id: "pp-load-prompt",
+          description: `Grace matched this song but it isn't open in ProPresenter.`,
+          duration: 8000,
+        })
+      }
     },
     [connectionStatus]
   )
