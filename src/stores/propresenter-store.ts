@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import { load, type Store } from "@tauri-apps/plugin-store"
+import type { PPSlideInfo } from "@/lib/propresenter-ws"
 
 export type PPConnectionStatus =
   | "disconnected"
@@ -20,6 +21,11 @@ export interface PPSlide {
   label: string
 }
 
+export interface PPLibraryEntry {
+  uid: string
+  name: string
+}
+
 interface ProPresenterState {
   // Connection config (persisted)
   host: string
@@ -35,6 +41,11 @@ interface ProPresenterState {
   lastPushedText: string
   lastPushedAt: number | null
 
+  // Library index — keyed by presentation UID
+  libraryEntries: PPLibraryEntry[]        // ordered list from `prl`
+  libraryIndex: Record<string, PPSlide[]> // uid -> slides
+  libraryLoaded: boolean                  // true once all `pre` responses have landed
+
   // Actions
   setHost: (host: string) => void
   setPort: (port: number) => void
@@ -45,9 +56,12 @@ interface ProPresenterState {
   setSlides: (slides: PPSlide[]) => void
   setActiveSlideIndex: (index: number) => void
   setLastPushed: (text: string) => void
+  setLibraryEntries: (entries: PPLibraryEntry[]) => void
+  indexPresentation: (uid: string, slides: PPSlideInfo[]) => void
+  clearLibrary: () => void
 }
 
-export const useProPresenterStore = create<ProPresenterState>((set) => ({
+export const useProPresenterStore = create<ProPresenterState>((set, get) => ({
   host: "127.0.0.1",
   port: 1025,
   password: "",
@@ -60,6 +74,10 @@ export const useProPresenterStore = create<ProPresenterState>((set) => ({
   lastPushedText: "",
   lastPushedAt: null,
 
+  libraryEntries: [],
+  libraryIndex: {},
+  libraryLoaded: false,
+
   setHost: (host) => set({ host }),
   setPort: (port) => set({ port }),
   setPassword: (password) => set({ password }),
@@ -70,6 +88,24 @@ export const useProPresenterStore = create<ProPresenterState>((set) => ({
   setActiveSlideIndex: (activeSlideIndex) => set({ activeSlideIndex }),
   setLastPushed: (text) =>
     set({ lastPushedText: text, lastPushedAt: Date.now() }),
+
+  setLibraryEntries: (entries) =>
+    set({ libraryEntries: entries, libraryLoaded: false }),
+
+  indexPresentation: (uid, slides) => {
+    const prev = get().libraryIndex
+    const totalEntries = get().libraryEntries.length
+    const nextIndex = { ...prev, [uid]: slides }
+    // Mark library as loaded once every entry has been indexed
+    const loadedCount = Object.keys(nextIndex).length
+    set({
+      libraryIndex: nextIndex,
+      libraryLoaded: totalEntries > 0 && loadedCount >= totalEntries,
+    })
+  },
+
+  clearLibrary: () =>
+    set({ libraryEntries: [], libraryIndex: {}, libraryLoaded: false }),
 }))
 
 // -- Persistence (mirrors the pattern in broadcast-store.ts) ------------------

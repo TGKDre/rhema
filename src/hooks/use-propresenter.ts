@@ -2,13 +2,18 @@
  * useProPresenter
  *
  * Manages the ProPresenter Remote Control WebSocket connection and exposes
- * pushLyric(text) to find and trigger the best-matching slide.
+ * pushLyric(text) for autonomous slide matching.
  *
- * Flow:
- *   1. STT pipeline fires `transcript_final` Tauri event.
- *   2. This hook picks it up via useTauriEvent (when autoMode is on).
- *   3. pushLyric() fuzzy-matches the transcript against loaded PP slides.
- *   4. The best match is triggered via ProPresenterWSClient.triggerSlide().
+ * Matching priority:
+ *   1. Search the currently active presentation's slides (fast path).
+ *   2. If no match found, search the full library index and switch
+ *      ProPresenter to the best-matching song before triggering the slide.
+ *
+ * Library indexing:
+ *   On every successful connection the WS client fetches the full `prl`
+ *   list, then drip-feeds `pre` requests one-at-a-time in the background.
+ *   The store accumulates them in libraryIndex. Once all presentations have
+ *   been fetched, libraryLoaded flips to true.
  */
 
 import { useEffect, useRef, useCallback } from "react"
@@ -18,6 +23,7 @@ import { useProPresenterStore } from "@/stores/propresenter-store"
 import { useSettingsStore } from "@/stores/settings-store"
 import { useTranscriptStore } from "@/stores/transcript-store"
 import { useTauriEvent } from "./use-tauri-event"
+import type { PPSlide } from "@/stores/propresenter-store"
 
 // -- Lyric matching helpers --------------------------------------------------
 
@@ -38,11 +44,17 @@ function similarity(a: string, b: string): number {
   return intersection / union
 }
 
+interface SlideMatch {
+  slideIndex: number
+  score: number
+}
+
+/** Find the best matching slide within a single presentation's slide list. */
 function findBestSlide(
   transcript: string,
-  slides: { index: number; text: string }[],
+  slides: PPSlide[],
   threshold = 0.35
-): number {
+): SlideMatch | null {
   const normTranscript = normalise(transcript)
   let bestIndex = -1
   let bestScore = threshold
@@ -56,7 +68,43 @@ function findBestSlide(
     }
   }
 
-  return bestIndex
+  return bestIndex === -1 ? null : { slideIndex: bestIndex, score: bestScore }
+}
+
+interface LibraryMatch {
+  uid: string
+  name: string
+  slideIndex: number
+  score: number
+}
+
+/**
+ * Search the entire library index for the best-matching slide across all songs.
+ * Returns null if nothing clears the threshold.
+ */
+function findBestLibraryMatch(
+  transcript: string,
+  libraryIndex: Record<string, PPSlide[]>,
+  libraryEntries: { uid: string; name: string }[],
+  threshold = 0.35
+): LibraryMatch | null {
+  let best: LibraryMatch | null = null
+
+  for (const entry of libraryEntries) {
+    const slides = libraryIndex[entry.uid]
+    if (!slides) continue
+    const match = findBestSlide(transcript, slides, threshold)
+    if (match && (!best || match.score > best.score)) {
+      best = {
+        uid: entry.uid,
+        name: entry.name,
+        slideIndex: match.slideIndex,
+        score: match.score,
+      }
+    }
+  }
+
+  return best
 }
 
 // -- Hook --------------------------------------------------------------------
@@ -79,6 +127,7 @@ export function useProPresenter() {
     if (!enabled) {
       clientRef.current?.disconnect()
       clientRef.current = null
+      useProPresenterStore.getState().clearLibrary()
       return
     }
 
@@ -94,17 +143,39 @@ export function useProPresenter() {
           })
         } else if (status === "disconnected") {
           toast.info("ProPresenter disconnected", { id: "pp-connection" })
+          store.clearLibrary()
         }
       },
+
       onSlides: (ppSlides, presentation) => {
         store.setSlides(ppSlides)
         store.setCurrentPresentation(presentation)
       },
+
       onSlideIndexChange: (index) => {
         store.setActiveSlideIndex(index)
       },
+
       onError: (msg) => {
         toast.error("ProPresenter error", { description: msg, id: "pp-error" })
+      },
+
+      /** Receive the full library list and register all UIDs in the store. */
+      onLibraryList: (entries) => {
+        store.setLibraryEntries(entries)
+      },
+
+      /** Each presentation fetched during background indexing lands here. */
+      onLibraryPresentation: (uid, ppSlides) => {
+        store.indexPresentation(uid, ppSlides)
+        // Once every song is indexed, fire a subtle toast
+        const { libraryLoaded, libraryEntries } = useProPresenterStore.getState()
+        if (libraryLoaded) {
+          toast.success("Library indexed", {
+            id: "pp-library",
+            description: `${libraryEntries.length} song${libraryEntries.length === 1 ? "" : "s"} ready for autonomous matching`,
+          })
+        }
       },
     })
 
@@ -138,7 +209,8 @@ export function useProPresenter() {
 
   const pushLyric = useCallback(
     (text: string) => {
-      if (!clientRef.current || connectionStatus !== "connected") {
+      const client = clientRef.current
+      if (!client || connectionStatus !== "connected") {
         toast.warning("ProPresenter not connected", {
           description: "Enable the ProPresenter integration in Settings.",
           id: "pp-not-connected",
@@ -146,21 +218,45 @@ export function useProPresenter() {
         return
       }
 
-      const currentSlides = useProPresenterStore.getState().slides
+      const store = useProPresenterStore.getState()
+      const currentSlides = store.slides
 
-      if (currentSlides.length === 0) {
-        clientRef.current.requestCurrentPresentation()
+      // 1. Fast path: try matching against the active presentation
+      if (currentSlides.length > 0) {
+        const match = findBestSlide(text, currentSlides)
+        if (match) {
+          client.triggerSlide(match.slideIndex)
+          store.setLastPushed(text)
+          store.setActiveSlideIndex(match.slideIndex)
+          return
+        }
+      } else {
+        // No slides loaded yet — request them and bail
+        client.requestCurrentPresentation()
         toast.info("Fetching ProPresenter slides...", { id: "pp-fetching" })
         return
       }
 
-      const bestIndex = findBestSlide(text, currentSlides)
+      // 2. Cross-song library search
+      const { libraryIndex, libraryEntries, libraryLoaded } = store
 
-      if (bestIndex === -1) return
+      if (!libraryLoaded && Object.keys(libraryIndex).length === 0) {
+        // Library hasn't started indexing yet — nothing we can do
+        return
+      }
 
-      clientRef.current.triggerSlide(bestIndex)
-      useProPresenterStore.getState().setLastPushed(text)
-      useProPresenterStore.getState().setActiveSlideIndex(bestIndex)
+      const libraryMatch = findBestLibraryMatch(text, libraryIndex, libraryEntries)
+
+      if (!libraryMatch) return
+
+      // Switch PP to the matching song and trigger the right slide
+      client.switchPresentationAndTrigger(libraryMatch.uid, libraryMatch.slideIndex)
+      store.setLastPushed(text)
+
+      toast.info(`Switched to "${libraryMatch.name}"`, {
+        id: "pp-switch",
+        description: `Slide ${libraryMatch.slideIndex + 1} — ${Math.round(libraryMatch.score * 100)}% match`,
+      })
     },
     [connectionStatus]
   )

@@ -23,11 +23,20 @@ export interface PPPresentationInfo {
   slideCount: number
 }
 
+export interface PPLibraryEntry {
+  uid: string
+  name: string
+}
+
 export interface PPWSCallbacks {
   onStatusChange: (status: PPWSStatus) => void
   onSlides: (slides: PPSlideInfo[], presentation: PPPresentationInfo) => void
   onSlideIndexChange: (index: number) => void
   onError: (msg: string) => void
+  /** Fired once after authentication with the full library list. */
+  onLibraryList?: (entries: PPLibraryEntry[]) => void
+  /** Fired for every presentation fetched during library indexing. */
+  onLibraryPresentation?: (uid: string, slides: PPSlideInfo[]) => void
 }
 
 const PROTOCOL_VERSION = 610
@@ -41,6 +50,13 @@ export class ProPresenterWSClient {
   private port: number
   private password: string
   private callbacks: PPWSCallbacks
+
+  /**
+   * UIDs queued for background library indexing. We drip-feed one request
+   * at a time so we don't flood PP with simultaneous `pre` requests.
+   */
+  private indexQueue: string[] = []
+  private indexingActive = false
 
   constructor(
     host: string,
@@ -64,6 +80,8 @@ export class ProPresenterWSClient {
   disconnect(): void {
     this.intentionalClose = true
     this._clearReconnect()
+    this.indexQueue = []
+    this.indexingActive = false
     this.ws?.close()
     this.ws = null
     this.authenticated = false
@@ -72,14 +90,35 @@ export class ProPresenterWSClient {
 
   /**
    * Trigger a specific slide by 0-based index in the current presentation.
-   * ProPresenter Remote protocol uses the `sl` action.
    */
   triggerSlide(index: number): void {
     this._send({ acn: "sl", uid: "", num: index })
   }
 
   /**
-   * Request the presentation list from ProPresenter.
+   * Switch ProPresenter to the presentation with the given UID and immediately
+   * trigger the slide at `slideIndex`.
+   */
+  switchPresentationAndTrigger(uid: string, slideIndex: number): void {
+    // `prl` with a uid focuses the presentation in PP
+    this._send({ acn: "pre", uid })
+    // Small delay then trigger — PP needs a moment to load the presentation
+    setTimeout(() => {
+      this._send({ acn: "sl", uid, num: slideIndex })
+    }, 150)
+  }
+
+  /**
+   * Request the presentation list (library) from ProPresenter.
+   * Response arrives as `prl` and is forwarded to onLibraryList.
+   */
+  requestLibrary(): void {
+    this._send({ acn: "prl", ptl: PROTOCOL_VERSION })
+  }
+
+  /**
+   * Request the currently active presentation's slide data.
+   * Triggers the `prl` → `pre` waterfall for the active presentation.
    */
   requestCurrentPresentation(): void {
     this._send({ acn: "prl", ptl: PROTOCOL_VERSION })
@@ -122,6 +161,8 @@ export class ProPresenterWSClient {
 
     this.ws.onclose = () => {
       this.authenticated = false
+      this.indexQueue = []
+      this.indexingActive = false
       if (!this.intentionalClose) {
         this.callbacks.onStatusChange("disconnected")
         this._scheduleReconnect()
@@ -142,8 +183,8 @@ export class ProPresenterWSClient {
         if (data.ath === true) {
           this.authenticated = true
           this.callbacks.onStatusChange("connected")
-          // Immediately fetch the active presentation's slides
-          this.requestCurrentPresentation()
+          // Kick off full library fetch
+          this.requestLibrary()
         } else {
           this.callbacks.onStatusChange("error")
           this.callbacks.onError(
@@ -158,9 +199,24 @@ export class ProPresenterWSClient {
       // Presentation list response
       case "prl": {
         const list = (data.ary as Array<Record<string, unknown>>) ?? []
-        if (list.length > 0) {
-          // Request full slide data for the first (active) presentation
-          this._send({ acn: "pre", uid: String(list[0].uid ?? "") })
+
+        const entries: PPLibraryEntry[] = list.map((item) => ({
+          uid: String(item.uid ?? ""),
+          name: String(item.name ?? item.title ?? ""),
+        }))
+
+        // Fire library list callback so store can register all UIDs
+        this.callbacks.onLibraryList?.(entries)
+
+        if (entries.length > 0) {
+          // First entry is the active presentation — request its slides for the main panel
+          this._send({ acn: "pre", uid: entries[0].uid })
+
+          // Queue all remaining UIDs for background indexing
+          const remainingUids = entries.slice(1).map((e) => e.uid)
+          this.indexQueue = remainingUids
+          // Start drip-feeding after a short delay so the active `pre` response lands first
+          setTimeout(() => this._drainIndexQueue(), 800)
         }
         break
       }
@@ -178,11 +234,23 @@ export class ProPresenterWSClient {
           label: String(s.lbl ?? s.label ?? ""),
         }))
 
-        this.callbacks.onSlides(slides, {
-          uid,
-          name,
-          slideCount: slides.length,
-        })
+        // If we were drip-feeding index requests, this might be a library slide
+        if (this.indexingActive) {
+          // Fire the library-presentation callback for indexing
+          this.callbacks.onLibraryPresentation?.(uid, slides)
+          this.indexingActive = false
+          // Drain next item
+          setTimeout(() => this._drainIndexQueue(), 100)
+        } else {
+          // This is the active presentation — update main panel
+          this.callbacks.onSlides(slides, {
+            uid,
+            name,
+            slideCount: slides.length,
+          })
+          // Also index it
+          this.callbacks.onLibraryPresentation?.(uid, slides)
+        }
         break
       }
 
@@ -195,6 +263,14 @@ export class ProPresenterWSClient {
       default:
         break
     }
+  }
+
+  /** Send the next queued UID for background indexing, one at a time. */
+  private _drainIndexQueue(): void {
+    if (this.indexQueue.length === 0 || this.intentionalClose) return
+    const uid = this.indexQueue.shift()!
+    this.indexingActive = true
+    this._send({ acn: "pre", uid })
   }
 
   /**
