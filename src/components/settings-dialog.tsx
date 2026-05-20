@@ -41,17 +41,19 @@ import {
   HelpCircleIcon,
   GraduationCapIcon,
   BrainCircuitIcon,
+  MonitorPlayIcon,
 } from "lucide-react"
 import { useSettingsStore } from "@/stores"
 import { useTutorialStore } from "@/stores/tutorial-store"
 import { useSettingsDialogStore } from "@/lib/settings-dialog"
+import { ProPresenterSettings } from "@/components/settings/propresenter-settings"
 import type { DeviceInfo } from "@/types/audio"
 
 /* -------------------------------------------------------------------------- */
 /*  Nav definition                                                            */
 /* -------------------------------------------------------------------------- */
 
-type NavSection = "audio" | "speech" | "bible" | "display" | "api-keys" | "remote" | "help"
+type NavSection = "audio" | "speech" | "bible" | "display" | "api-keys" | "remote" | "propresenter" | "help"
 
 const navItems: { name: string; id: NavSection; icon: React.ReactNode }[] = [
   {
@@ -78,6 +80,11 @@ const navItems: { name: string; id: NavSection; icon: React.ReactNode }[] = [
     name: "Remote Control",
     id: "remote",
     icon: <RadioIcon strokeWidth={2} />,
+  },
+  {
+    name: "ProPresenter",
+    id: "propresenter",
+    icon: <MonitorPlayIcon strokeWidth={2} />,
   },
   {
     name: "API Keys",
@@ -437,6 +444,7 @@ const sectionTitles: Record<NavSection, string> = {
   bible: "Bible Translation",
   display: "Display Mode",
   remote: "Remote Control",
+  propresenter: "ProPresenter",
   "api-keys": "API Keys",
   help: "Help",
 }
@@ -874,6 +882,7 @@ const sectionComponents: Record<NavSection, React.FC> = {
   bible: BibleSection,
   display: DisplayModeSection,
   remote: RemoteControlSection,
+  propresenter: ProPresenterSettings,
   "api-keys": ApiKeysSection,
   help: HelpSection,
 }
@@ -924,7 +933,7 @@ export function SettingsDialog() {
                       <SidebarMenuItem key={item.id}>
                         <SidebarMenuButton
                           isActive={item.id === activeSection}
-                          onClick={() => setActiveSection(item.id)}
+                          onClick={() => setActiveSection(item.id as NavSection)}
                         >
                           {item.icon}
                           <span>{item.name}</span>
