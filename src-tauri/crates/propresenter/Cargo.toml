@@ -1,0 +1,17 @@
+[package]
+name = "rhema-propresenter"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
