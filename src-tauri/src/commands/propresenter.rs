@@ -61,6 +61,15 @@ pub async fn pp_disconnect(
     Ok(())
 }
 
+/// Returns whether a ProPresenter client is currently connected.
+#[tauri::command]
+pub fn pp_is_connected(
+    state: State<'_, Mutex<AppState>>,
+) -> Result<bool, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    Ok(app_state.propresenter.is_some())
+}
+
 // ── Library ────────────────────────────────────────────────────────────────
 
 /// Fetch the full song/presentation library from ProPresenter.
@@ -236,8 +245,8 @@ pub async fn pp_trigger_index(
 
 /// Enable or disable STT-driven automatic slide advance.
 ///
-/// When enabled, `check_reading_mode` in `stt.rs` will call `pp_trigger_next`
-/// automatically whenever ReadingMode matches the current lyric line.
+/// When enabled, `check_reading_mode` in `stt.rs` will call `trigger_next`
+/// automatically whenever ReadingMode matches the current lyric/verse line.
 /// When disabled, advances must be triggered manually via `pp_trigger_next`.
 #[tauri::command]
 pub fn pp_set_auto_advance(
@@ -250,4 +259,13 @@ pub fn pp_set_auto_advance(
     log::info!("[PP7] Auto-advance: {}", if enabled { "ON" } else { "OFF" });
     let _ = app.emit("pp_auto_advance_changed", enabled);
     Ok(())
+}
+
+/// Return the current value of the auto-advance flag.
+#[tauri::command]
+pub fn pp_get_auto_advance(
+    state: State<'_, Mutex<AppState>>,
+) -> Result<bool, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    Ok(app_state.auto_advance_enabled)
 }
