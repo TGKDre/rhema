@@ -1,13 +1,7 @@
 import type { Step } from "react-joyride"
 
-const STEP_DEFAULTS = {
-  disableBeacon: true,
-  skipBeacon: true,
-} as const satisfies Partial<Step>
-
 export const TUTORIAL_STEPS: Step[] = [
   {
-    ...STEP_DEFAULTS,
     target: '[data-slot="transcript-panel"]',
     title: "Live Transcript",
     content:
@@ -15,7 +9,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "right",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-slot="detections-panel"]',
     title: "AI Detections",
     content:
@@ -23,7 +16,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "left",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-tour="book-search"]',
     title: "Book Search",
     content:
@@ -32,7 +24,6 @@ export const TUTORIAL_STEPS: Step[] = [
     spotlightPadding: 2,
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-tour="context-search"]',
     title: "Context Search",
     content:
@@ -41,7 +32,6 @@ export const TUTORIAL_STEPS: Step[] = [
     spotlightPadding: 2,
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-tour="quick-nav"]',
     title: "Quick Navigation",
     content:
@@ -50,7 +40,6 @@ export const TUTORIAL_STEPS: Step[] = [
     spotlightPadding: 2,
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-slot="queue-panel"]',
     title: "Verse Queue",
     content:
@@ -58,7 +47,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "left",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-slot="preview-panel"]',
     title: "Programme Preview",
     content:
@@ -66,7 +54,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "bottom",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-slot="live-output-panel"]',
     title: "Live Display",
     content:
@@ -74,7 +61,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "bottom",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-tour="broadcast"]',
     title: "Broadcast",
     content:
@@ -82,7 +68,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "bottom",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-tour="theme"]',
     title: "Themes",
     content:
@@ -90,7 +75,6 @@ export const TUTORIAL_STEPS: Step[] = [
     placement: "bottom",
   },
   {
-    ...STEP_DEFAULTS,
     target: '[data-tour="settings"]',
     title: "Settings",
     content:

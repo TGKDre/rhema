@@ -47,7 +47,7 @@ function uuid(): string {
   return crypto.randomUUID()
 }
 
-export const useSongLibraryStore = create<SongLibraryState>((set, get) => ({
+export const useSongLibraryStore = create<SongLibraryState>((set) => ({
   songs: [],
   loaded: false,
 
@@ -82,8 +82,8 @@ export const useSongLibraryStore = create<SongLibraryState>((set, get) => ({
 
   importSongs: (incoming) => {
     set((s) => {
-      const existingIds = new Set(s.songs.map((s) => s.id))
-      const newSongs = incoming.filter((s) => !existingIds.has(s.id))
+      const existingIds = new Set(s.songs.map((song) => song.id))
+      const newSongs = incoming.filter((song) => !existingIds.has(song.id))
       return { songs: [...s.songs, ...newSongs] }
     })
     persistLibrary()

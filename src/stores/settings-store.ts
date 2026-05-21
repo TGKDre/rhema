@@ -55,7 +55,6 @@ const PERSISTED_KEYS = [
   "deepgramApiKey",
   "openaiApiKey",
   "claudeApiKey",
-  "activeTranslationId",
   "audioDeviceId",
   "gain",
   "autoMode",
@@ -64,8 +63,6 @@ const PERSISTED_KEYS = [
   "onboardingComplete",
   "sttProvider",
 ] as const satisfies readonly (keyof SettingsState)[]
-
-type PersistedKey = (typeof PERSISTED_KEYS)[number]
 
 let tauriStore: Store | null = null
 let hydrationPromise: Promise<void> | null = null
@@ -96,8 +93,6 @@ export function hydrateSettings(): Promise<void> {
         useSettingsStore.setState(patch)
       }
 
-      // Attach only after successful hydration so as not to overwrite disk with defaults.
-      // Debounce writes, so a dragged slider (e.g. gain) coalesces into a single disk write.
       useSettingsStore.subscribe((state, prevState) => {
         const changed = PERSISTED_KEYS.some((k) => state[k] !== prevState[k])
         if (!changed) return

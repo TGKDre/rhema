@@ -43,7 +43,6 @@ const PROTOCOL_VERSION = 610
 
 export class ProPresenterWSClient {
   private ws: WebSocket | null = null
-  private authenticated = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private intentionalClose = false
   private host: string
@@ -84,7 +83,6 @@ export class ProPresenterWSClient {
     this.indexingActive = false
     this.ws?.close()
     this.ws = null
-    this.authenticated = false
     this.callbacks.onStatusChange("disconnected")
   }
 
@@ -100,9 +98,7 @@ export class ProPresenterWSClient {
    * trigger the slide at `slideIndex`.
    */
   switchPresentationAndTrigger(uid: string, slideIndex: number): void {
-    // `prl` with a uid focuses the presentation in PP
     this._send({ acn: "pre", uid })
-    // Small delay then trigger — PP needs a moment to load the presentation
     setTimeout(() => {
       this._send({ acn: "sl", uid, num: slideIndex })
     }, 150)
@@ -118,7 +114,6 @@ export class ProPresenterWSClient {
 
   /**
    * Request the currently active presentation's slide data.
-   * Triggers the `prl` → `pre` waterfall for the active presentation.
    */
   requestCurrentPresentation(): void {
     this._send({ acn: "prl", ptl: PROTOCOL_VERSION })
@@ -160,7 +155,6 @@ export class ProPresenterWSClient {
     }
 
     this.ws.onclose = () => {
-      this.authenticated = false
       this.indexQueue = []
       this.indexingActive = false
       if (!this.intentionalClose) {
@@ -181,9 +175,7 @@ export class ProPresenterWSClient {
     switch (data.acn as string) {
       case "ath": {
         if (data.ath === true) {
-          this.authenticated = true
           this.callbacks.onStatusChange("connected")
-          // Kick off full library fetch
           this.requestLibrary()
         } else {
           this.callbacks.onStatusChange("error")
@@ -196,7 +188,6 @@ export class ProPresenterWSClient {
         break
       }
 
-      // Presentation list response
       case "prl": {
         const list = (data.ary as Array<Record<string, unknown>>) ?? []
 
@@ -205,23 +196,17 @@ export class ProPresenterWSClient {
           name: String(item.name ?? item.title ?? ""),
         }))
 
-        // Fire library list callback so store can register all UIDs
         this.callbacks.onLibraryList?.(entries)
 
         if (entries.length > 0) {
-          // First entry is the active presentation — request its slides for the main panel
           this._send({ acn: "pre", uid: entries[0].uid })
-
-          // Queue all remaining UIDs for background indexing
           const remainingUids = entries.slice(1).map((e) => e.uid)
           this.indexQueue = remainingUids
-          // Start drip-feeding after a short delay so the active `pre` response lands first
           setTimeout(() => this._drainIndexQueue(), 800)
         }
         break
       }
 
-      // Full presentation + slides response
       case "pre": {
         const uid = String(data.uid ?? "")
         const name = String(data.name ?? "")
@@ -234,27 +219,21 @@ export class ProPresenterWSClient {
           label: String(s.lbl ?? s.label ?? ""),
         }))
 
-        // If we were drip-feeding index requests, this might be a library slide
         if (this.indexingActive) {
-          // Fire the library-presentation callback for indexing
           this.callbacks.onLibraryPresentation?.(uid, slides)
           this.indexingActive = false
-          // Drain next item
           setTimeout(() => this._drainIndexQueue(), 100)
         } else {
-          // This is the active presentation — update main panel
           this.callbacks.onSlides(slides, {
             uid,
             name,
             slideCount: slides.length,
           })
-          // Also index it
           this.callbacks.onLibraryPresentation?.(uid, slides)
         }
         break
       }
 
-      // ProPresenter advanced to a new slide (user-driven)
       case "sli": {
         this.callbacks.onSlideIndexChange(Number(data.num ?? -1))
         break
@@ -265,7 +244,6 @@ export class ProPresenterWSClient {
     }
   }
 
-  /** Send the next queued UID for background indexing, one at a time. */
   private _drainIndexQueue(): void {
     if (this.indexQueue.length === 0 || this.intentionalClose) return
     const uid = this.indexQueue.shift()!
@@ -273,9 +251,6 @@ export class ProPresenterWSClient {
     this._send({ acn: "pre", uid })
   }
 
-  /**
-   * Walk the nested element/run structure PP uses and collect all text runs.
-   */
   private _extractSlideText(slide: Record<string, unknown>): string {
     const parts: string[] = []
     const elements = (slide.ary as Array<Record<string, unknown>>) ?? []

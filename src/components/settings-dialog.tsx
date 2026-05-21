@@ -421,7 +421,10 @@ function RemoteControlSection() {
       for (const event of remoteEvents) {
         const unlisten = await listen(event, () => {
           if (cancelled) return
-          setCommandLog((prev) => [{ id: logIdRef.current++, timestamp: new Date().toLocaleTimeString(), source: "OSC", command: event.replace("remote:", "") }, ...prev].slice(0, 50))
+          setCommandLog((prev) => [
+            { id: logIdRef.current++, timestamp: new Date().toLocaleTimeString(), source: "OSC" as const, command: event.replace("remote:", "") },
+            ...prev,
+          ].slice(0, 50))
         })
         unlisteners.push(unlisten)
       }
