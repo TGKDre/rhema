@@ -29,6 +29,8 @@ pub fn run() {
         .manage(Mutex::new(rhema_detection::ReadingMode::new()))
         .manage(Mutex::new(commands::remote::OscRuntime::new()))
         .manage(Mutex::new(commands::remote::HttpRuntime::new()))
+        // ProPresenter client — starts disconnected; call pp_connect from the UI
+        .manage(Mutex::new(rhema_propresenter::ProPresenterClient::disconnected()))
         .invoke_handler(tauri::generate_handler![
             commands::bible::list_translations,
             commands::bible::list_books,
@@ -63,6 +65,16 @@ pub fn run() {
             commands::remote::stop_http,
             commands::remote::get_http_status,
             commands::remote::update_remote_status,
+            // ── ProPresenter ──────────────────────────────────────────────────
+            commands::propresenter::pp_connect,
+            commands::propresenter::pp_disconnect,
+            commands::propresenter::pp_is_connected,
+            commands::propresenter::pp_get_library,
+            commands::propresenter::pp_load_song,
+            commands::propresenter::pp_trigger_next,
+            commands::propresenter::pp_trigger_index,
+            commands::propresenter::pp_set_auto_advance,
+            commands::propresenter::pp_get_auto_advance,
         ])
         .setup(|app| {
             use tauri::Manager;

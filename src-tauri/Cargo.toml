@@ -8,6 +8,7 @@ members = [
     "crates/broadcast",
     "crates/api",
     "crates/notes",
+    "crates/propresenter",
 ]
 resolver = "2"
 
@@ -62,6 +63,7 @@ rhema-stt = { path = "crates/stt" }
 rhema-broadcast = { path = "crates/broadcast" }
 rhema-detection = { path = "crates/detection", features = ["onnx", "vector-search"] }
 rhema-api = { path = "crates/api" }
+rhema-propresenter = { path = "crates/propresenter" }
 crossbeam-channel = "0.5"
 dotenvy = "0.15"
 base64 = "0.22"
