@@ -28,12 +28,12 @@ import { useEffect, useRef, useCallback } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { toast } from "sonner"
 import { ProPresenterWSClient } from "@/lib/propresenter-ws"
+import type { PPWSCallbacks } from "@/lib/propresenter-ws"
 import { useProPresenterStore } from "@/stores/propresenter-store"
 import { useSettingsStore } from "@/stores/settings-store"
 import { useTranscriptStore } from "@/stores/transcript-store"
 import { useSongLibraryStore } from "@/stores/song-library-store"
 import { buildCorpusIndex, findBestCorpusMatch } from "@/lib/song-library-db"
-import { useTauriEvent } from "./use-tauri-event"
 import type { PPSlide } from "@/stores/propresenter-store"
 import type { CorpusSlide } from "@/lib/song-library-db"
 
@@ -73,24 +73,23 @@ export function useProPresenter() {
     setLibraryEntries,
     indexPresentation,
     clearLibrary,
-    libraryIndex,
   } = useProPresenterStore()
 
   const autoMode = useSettingsStore((s) => s.autoMode)
-  const lastTranscript = useTranscriptStore((s) => s.lastFinalTranscript)
+
+  // Derive the most recent final transcript text from segments
+  const segments = useTranscriptStore((s) => s.segments)
+  const lastTranscript =
+    segments.length > 0 ? (segments[segments.length - 1].text ?? "") : ""
 
   // -- Corpus index -----------------------------------------------------------
-  // Rebuilt whenever the song library changes.
   useEffect(() => {
     corpusRef.current = buildCorpusIndex(songs)
   }, [songs])
 
   // -- Auto-advance Rust-side sync --------------------------------------------
-  // Mirror every autoMode change to the Rust AppState so `check_reading_mode`
-  // in stt.rs knows whether to fire `trigger_next` on ReadingAdvance events.
   useEffect(() => {
     invoke("pp_set_auto_advance", { enabled: autoMode }).catch((err) => {
-      // Non-fatal — PP may not be connected yet. Log but don't toast.
       console.warn("[PP] pp_set_auto_advance failed:", err)
     })
   }, [autoMode])
@@ -105,51 +104,57 @@ export function useProPresenter() {
       return
     }
 
-    const ws = new ProPresenterWSClient(host, port, password)
-    wsRef.current = ws
+    const callbacks: PPWSCallbacks = {
+      onStatusChange: (status) => {
+        setConnectionStatus(status)
+        if (status === "connected") {
+          toast.success("ProPresenter connected")
+        } else if (status === "disconnected") {
+          toast.info("ProPresenter disconnected")
+          clearLibrary()
+        } else if (status === "error") {
+          toast.error("ProPresenter connection error")
+        }
+      },
 
-    ws.onStatusChange = (status) => {
-      setConnectionStatus(status)
-      if (status === "connected") {
-        toast.success("ProPresenter connected")
-        // Start background library indexing
-        ws.fetchLibraryIndex().then((entries) => {
-          setLibraryEntries(entries)
-          for (const entry of entries) {
-            ws.fetchPresentation(entry.uid).then((slides) => {
-              indexPresentation(entry.uid, slides)
-            })
-          }
+      onSlides: (slides, presentation) => {
+        setCurrentPresentation({
+          uid: presentation.uid,
+          name: presentation.name,
+          slideCount: slides.length,
         })
-      } else if (status === "disconnected") {
-        toast.info("ProPresenter disconnected")
-        clearLibrary()
-      } else if (status === "error") {
-        toast.error("ProPresenter connection error")
-      }
+        setSlides(
+          slides.map((s, i) => ({
+            uid: s.uid ?? `slide-${i}`,
+            index: s.index ?? i,
+            text: s.text ?? "",
+            label: s.label ?? "",
+          }))
+        )
+        setActiveSlideIndex(0)
+        // Also index the active presentation into the library
+        indexPresentation(presentation.uid, slides)
+      },
+
+      onSlideIndexChange: (index) => {
+        setActiveSlideIndex(index)
+      },
+
+      onError: (msg) => {
+        console.error("[PP]", msg)
+      },
+
+      onLibraryList: (entries) => {
+        setLibraryEntries(entries)
+      },
+
+      onLibraryPresentation: (uid, slides) => {
+        indexPresentation(uid, slides)
+      },
     }
 
-    ws.onPresentationChange = (presentation, slides) => {
-      setCurrentPresentation({
-        uid: presentation.uid,
-        name: presentation.name,
-        slideCount: slides.length,
-      })
-      setSlides(
-        slides.map((s, i) => ({
-          uid: s.uid ?? `slide-${i}`,
-          index: s.index ?? i,
-          text: s.slideText ?? "",
-          label: s.label ?? "",
-        }))
-      )
-      setActiveSlideIndex(0)
-    }
-
-    ws.onSlideChange = (index) => {
-      setActiveSlideIndex(index)
-    }
-
+    const ws = new ProPresenterWSClient(host, port, password, callbacks)
+    wsRef.current = ws
     ws.connect()
 
     return () => {
@@ -157,6 +162,7 @@ export function useProPresenter() {
       wsRef.current = null
       setConnectionStatus("disconnected")
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, host, port, password])
 
   // -- pushLyric --------------------------------------------------------------
@@ -170,41 +176,53 @@ export function useProPresenter() {
 
       const { slides, libraryIndex: index } = useProPresenterStore.getState()
 
-      // Stage 1: active presentation
-      let best: { uid: string; index: number } | null = null
+      // Stage 1: active presentation — triggerSlide(index) only, no uid needed
+      let bestIndex: number | null = null
+      let bestUid: string | null = null
       let bestScore = 0.45
+      let isActiveSlide = false
 
       for (const slide of slides) {
         const score = similarity(norm, normalise(slide.text))
         if (score > bestScore) {
           bestScore = score
-          best = { uid: slide.uid, index: slide.index }
+          bestIndex = slide.index
+          bestUid = slide.uid
+          isActiveSlide = true
         }
       }
 
-      // Stage 2: library index
-      if (!best) {
+      // Stage 2: library index — need switchPresentationAndTrigger
+      if (bestIndex === null) {
         for (const [uid, libSlides] of Object.entries(index)) {
           for (const slide of libSlides as PPSlide[]) {
             const score = similarity(norm, normalise(slide.text))
             if (score > bestScore) {
               bestScore = score
-              best = { uid: slide.uid, index: slide.index }
+              bestIndex = slide.index
+              bestUid = uid
+              isActiveSlide = false
             }
           }
         }
       }
 
-      // Stage 3: corpus
-      if (!best) {
-        const match = findBestCorpusMatch(corpusRef.current, norm, 0.3)
+      // Stage 3: corpus — need switchPresentationAndTrigger
+      if (bestIndex === null) {
+        const match = findBestCorpusMatch(text, corpusRef.current, 0.3)
         if (match) {
-          best = { uid: match.uid, index: match.index }
+          bestIndex = match.slideIndex
+          bestUid = match.songId
+          isActiveSlide = false
         }
       }
 
-      if (best) {
-        ws.triggerSlide(best.uid, best.index)
+      if (bestIndex !== null) {
+        if (isActiveSlide) {
+          ws.triggerSlide(bestIndex)
+        } else if (bestUid !== null) {
+          ws.switchPresentationAndTrigger(bestUid, bestIndex)
+        }
         setLastPushed(text)
       }
     },
@@ -213,7 +231,7 @@ export function useProPresenter() {
 
   // -- refreshSlides ----------------------------------------------------------
   const refreshSlides = useCallback(() => {
-    wsRef.current?.refreshPresentation()
+    wsRef.current?.requestCurrentPresentation()
   }, [])
 
   // -- Auto-push on transcript ------------------------------------------------
@@ -222,5 +240,8 @@ export function useProPresenter() {
     pushLyric(lastTranscript)
   }, [lastTranscript, autoMode, pushLyric])
 
-  return { pushLyric, refreshSlides }
+  // Expose connectionStatus from the store for UI consumers
+  const connectionStatus = useProPresenterStore((s) => s.connectionStatus)
+
+  return { pushLyric, refreshSlides, connectionStatus }
 }
