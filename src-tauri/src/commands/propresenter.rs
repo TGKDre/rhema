@@ -8,7 +8,7 @@ use rhema_propresenter::{LibraryEntry, PresentationInfo, ProPresenterClient};
 
 use crate::state::AppState;
 
-// ── Connection ─────────────────────────────────────────────────────────────
+// ── Connection ─────────────────────────────────────────────────────
 
 /// Connect to a ProPresenter 7 instance on the local network.
 ///
@@ -70,46 +70,26 @@ pub fn pp_is_connected(
     Ok(app_state.propresenter.is_some())
 }
 
-// ── Library ────────────────────────────────────────────────────────────────
+// ── Library ───────────────────────────────────────────────────────
 
 /// Fetch the full song/presentation library from ProPresenter.
 #[tauri::command]
 pub async fn pp_get_library(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<Vec<LibraryEntry>, String> {
-    let client_ref = {
-        // We need to get a reference to the client without holding the mutex
-        // across an await point, so we clone the Arc'd client.
-        let app_state = state.lock().map_err(|e| e.to_string())?;
-        app_state
-            .propresenter
-            .as_ref()
-            .map(|c| std::sync::Arc::new(c.clone_sender()))
-            .ok_or_else(|| "Not connected to ProPresenter".to_string())?
-    };
-
-    // Re-acquire a fresh client reference via a second approach:
-    // Since ProPresenterClient holds only a channel sender (which is Clone),
-    // we reconstruct a thin wrapper. See note in state.rs.
-    drop(client_ref);
-
-    // Simpler: hold the lock, call the async fn synchronously via block_in_place
-    // (we're already on a tokio worker from Tauri's async runtime).
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let client = app_state
         .propresenter
         .as_ref()
         .ok_or_else(|| "Not connected to ProPresenter".to_string())?;
 
-    // SAFETY: We're inside a Tauri async command, already on a tokio worker.
-    // block_in_place lets us call async code while holding the sync Mutex.
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(client.get_library())
     })
     .map_err(|e| format!("[PP7] get_library failed: {e}"))
 }
 
-// ── Song loading ───────────────────────────────────────────────────────────
+// ── Song loading ─────────────────────────────────────────────────
 
 /// Load a song from ProPresenter into ReadingMode.
 ///
@@ -143,10 +123,7 @@ pub async fn pp_load_song(
         info.slides.len()
     );
 
-    // ── 2. Load slides into ReadingMode ────────────────────────────────
-    // ReadingMode stores `(line_index, text)` pairs per song section.
-    // We use the global slide_index as line_index so ReadingMode's advance
-    // position maps 1:1 with ProPresenter's slide indices.
+    // ── 2. Load slides into ReadingMode ──────────────────────────────
     {
         use rhema_detection::ReadingMode;
         let rm_managed: &Mutex<ReadingMode> = app.state::<Mutex<ReadingMode>>().inner();
@@ -160,8 +137,6 @@ pub async fn pp_load_song(
                 })
                 .collect();
 
-            // Use the first slide's group_name as the section label.
-            // book_number = 0 is the sentinel for "lyric mode" (not a Bible book).
             let first_group = info
                 .slides
                 .first()
@@ -184,7 +159,7 @@ pub async fn pp_load_song(
         }
     }
 
-    // ── 3. Trigger slide 0 on ProPresenter ────────────────────────────
+    // ── 3. Trigger slide 0 on ProPresenter ───────────────────────────
     if !info.slides.is_empty() {
         let first_index = info.slides[0].slide_index;
         let app_state = state.lock().map_err(|e| e.to_string())?;
@@ -202,7 +177,7 @@ pub async fn pp_load_song(
     Ok(info)
 }
 
-// ── Slide control ──────────────────────────────────────────────────────────
+// ── Slide control ──────────────────────────────────────────────────────
 
 /// Manually advance to the next slide in ProPresenter.
 #[tauri::command]
@@ -241,7 +216,7 @@ pub async fn pp_trigger_index(
     .map_err(|e| format!("[PP7] trigger_index failed: {e}"))
 }
 
-// ── Auto-advance toggle ────────────────────────────────────────────────────
+// ── Auto-advance toggle ──────────────────────────────────────────────
 
 /// Enable or disable STT-driven automatic slide advance.
 ///
