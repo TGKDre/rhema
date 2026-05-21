@@ -1,0 +1,60 @@
+name: Build Grace (Windows)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build Tauri app (Windows)
+        run: bun tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: grace-windows-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: warn
+
+      - name: Upload NSIS installer (.exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: grace-windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: grace-windows-portable
+          path: src-tauri/target/release/grace.exe
+          if-no-files-found: warn
