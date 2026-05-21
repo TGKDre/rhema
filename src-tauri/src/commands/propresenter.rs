@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use rhema_propresenter::{LibraryEntry, PresentationInfo, ProPresenterClient};
+use rhema_propresenter::{LibraryEntry, PresentationInfo};
 
 use crate::state::AppState;
 
@@ -24,7 +24,7 @@ pub async fn pp_connect(
 ) -> Result<(), String> {
     let pw = password.unwrap_or_default();
 
-    let client = ProPresenterClient::connect(&ip, port, &pw)
+    let client = rhema_propresenter::ProPresenterClient::connect(&ip, port, &pw)
         .await
         .map_err(|e| format!("[PP7] Connect failed: {e}"))?;
 
@@ -219,10 +219,6 @@ pub async fn pp_trigger_index(
 // ── Auto-advance toggle ──────────────────────────────────────────────
 
 /// Enable or disable STT-driven automatic slide advance.
-///
-/// When enabled, `check_reading_mode` in `stt.rs` will call `trigger_next`
-/// automatically whenever ReadingMode matches the current lyric/verse line.
-/// When disabled, advances must be triggered manually via `pp_trigger_next`.
 #[tauri::command]
 pub fn pp_set_auto_advance(
     app: AppHandle,

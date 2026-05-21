@@ -9,7 +9,3 @@ pub mod types;
 
 pub use client::ProPresenterClient;
 pub use types::{LibraryEntry, PresentationInfo, ProSlide};
-
-// Re-export the error type used by client methods.
-pub use anyhow::Error as ProError;
-pub use anyhow::Result as ProResult;
