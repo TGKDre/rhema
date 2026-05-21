@@ -17,9 +17,15 @@
  *   Built from useSongLibraryStore on hook mount and whenever songs change.
  *   Uses a lower threshold (0.30) since the corpus is curated and lyrics
  *   are clean, unlike live transcripts matched against PP slide text.
+ *
+ * Auto-advance sync:
+ *   When autoMode changes, the hook calls `pp_set_auto_advance` on the
+ *   Rust side so the STT pipeline's `check_reading_mode` can fire
+ *   `trigger_next` on every ReadingAdvance without any JS involvement.
  */
 
 import { useEffect, useRef, useCallback } from "react"
+import { invoke } from "@tauri-apps/api/core"
 import { toast } from "sonner"
 import { ProPresenterWSClient } from "@/lib/propresenter-ws"
 import { useProPresenterStore } from "@/stores/propresenter-store"
@@ -45,262 +51,176 @@ function similarity(a: string, b: string): number {
   const setA = new Set(a.split(" ").filter(Boolean))
   const setB = new Set(b.split(" ").filter(Boolean))
   if (setA.size === 0 || setB.size === 0) return 0
-  const intersection = [...setA].filter((w) => setB.has(w)).length
-  const union = new Set([...setA, ...setB]).size
-  return intersection / union
+  const intersection = [...setA].filter((w) => setB.has(w))
+  return intersection.length / Math.max(setA.size, setB.size)
 }
-
-interface SlideMatch {
-  slideIndex: number
-  score: number
-}
-
-function findBestSlide(
-  transcript: string,
-  slides: PPSlide[],
-  threshold = 0.35
-): SlideMatch | null {
-  const normTranscript = normalise(transcript)
-  let bestIndex = -1
-  let bestScore = threshold
-
-  for (const slide of slides) {
-    if (!slide.text) continue
-    const score = similarity(normTranscript, normalise(slide.text))
-    if (score > bestScore) {
-      bestScore = score
-      bestIndex = slide.index
-    }
-  }
-
-  return bestIndex === -1 ? null : { slideIndex: bestIndex, score: bestScore }
-}
-
-interface LibraryMatch {
-  uid: string
-  name: string
-  slideIndex: number
-  score: number
-}
-
-function findBestLibraryMatch(
-  transcript: string,
-  libraryIndex: Record<string, PPSlide[]>,
-  libraryEntries: { uid: string; name: string }[],
-  threshold = 0.35
-): LibraryMatch | null {
-  let best: LibraryMatch | null = null
-
-  for (const entry of libraryEntries) {
-    const slides = libraryIndex[entry.uid]
-    if (!slides) continue
-    const match = findBestSlide(transcript, slides, threshold)
-    if (match && (!best || match.score > best.score)) {
-      best = {
-        uid: entry.uid,
-        name: entry.name,
-        slideIndex: match.slideIndex,
-        score: match.score,
-      }
-    }
-  }
-
-  return best
-}
-
-// -- Hook --------------------------------------------------------------------
 
 export function useProPresenter() {
-  const enabled = useProPresenterStore((s) => s.enabled)
-  const host = useProPresenterStore((s) => s.host)
-  const port = useProPresenterStore((s) => s.port)
-  const password = useProPresenterStore((s) => s.password)
-  const connectionStatus = useProPresenterStore((s) => s.connectionStatus)
-  const slides = useProPresenterStore((s) => s.slides)
+  const wsRef = useRef<ProPresenterWSClient | null>(null)
+  const songs = useSongLibraryStore((s) => s.songs)
+  const corpusRef = useRef<CorpusSlide[]>([])
+
+  const {
+    host,
+    port,
+    password,
+    enabled,
+    setConnectionStatus,
+    setCurrentPresentation,
+    setSlides,
+    setActiveSlideIndex,
+    setLastPushed,
+    setLibraryEntries,
+    indexPresentation,
+    clearLibrary,
+    libraryIndex,
+  } = useProPresenterStore()
+
   const autoMode = useSettingsStore((s) => s.autoMode)
-  const librarySongs = useSongLibraryStore((s) => s.songs)
+  const lastTranscript = useTranscriptStore((s) => s.lastFinalTranscript)
 
-  const clientRef = useRef<ProPresenterWSClient | null>(null)
-  const lastActedSegmentId = useRef<string | null>(null)
-  // Rebuild corpus index whenever songs change
-  const corpusIndexRef = useRef<CorpusSlide[]>([])
-
+  // -- Corpus index -----------------------------------------------------------
+  // Rebuilt whenever the song library changes.
   useEffect(() => {
-    corpusIndexRef.current = buildCorpusIndex(librarySongs)
-  }, [librarySongs])
+    corpusRef.current = buildCorpusIndex(songs)
+  }, [songs])
 
-  // -- Connection lifecycle --------------------------------------------------
+  // -- Auto-advance Rust-side sync --------------------------------------------
+  // Mirror every autoMode change to the Rust AppState so `check_reading_mode`
+  // in stt.rs knows whether to fire `trigger_next` on ReadingAdvance events.
+  useEffect(() => {
+    invoke("pp_set_auto_advance", { enabled: autoMode }).catch((err) => {
+      // Non-fatal — PP may not be connected yet. Log but don't toast.
+      console.warn("[PP] pp_set_auto_advance failed:", err)
+    })
+  }, [autoMode])
 
+  // -- WS connection lifecycle ------------------------------------------------
   useEffect(() => {
     if (!enabled) {
-      clientRef.current?.disconnect()
-      clientRef.current = null
-      useProPresenterStore.getState().clearLibrary()
+      wsRef.current?.disconnect()
+      wsRef.current = null
+      setConnectionStatus("disconnected")
+      clearLibrary()
       return
     }
 
-    const store = useProPresenterStore.getState()
+    const ws = new ProPresenterWSClient(host, port, password)
+    wsRef.current = ws
 
-    const client = new ProPresenterWSClient(host, port, password, {
-      onStatusChange: (status) => {
-        store.setConnectionStatus(status)
-        if (status === "connected") {
-          toast.success("ProPresenter connected", {
-            id: "pp-connection",
-            description: `${host}:${port}`,
-          })
-        } else if (status === "disconnected") {
-          toast.info("ProPresenter disconnected", { id: "pp-connection" })
-          store.clearLibrary()
-        }
-      },
+    ws.onStatusChange = (status) => {
+      setConnectionStatus(status)
+      if (status === "connected") {
+        toast.success("ProPresenter connected")
+        // Start background library indexing
+        ws.fetchLibraryIndex().then((entries) => {
+          setLibraryEntries(entries)
+          for (const entry of entries) {
+            ws.fetchPresentation(entry.uid).then((slides) => {
+              indexPresentation(entry.uid, slides)
+            })
+          }
+        })
+      } else if (status === "disconnected") {
+        toast.info("ProPresenter disconnected")
+        clearLibrary()
+      } else if (status === "error") {
+        toast.error("ProPresenter connection error")
+      }
+    }
 
-      onSlides: (ppSlides, presentation) => {
-        store.setSlides(ppSlides)
-        store.setCurrentPresentation(presentation)
-      },
+    ws.onPresentationChange = (presentation, slides) => {
+      setCurrentPresentation({
+        uid: presentation.uid,
+        name: presentation.name,
+        slideCount: slides.length,
+      })
+      setSlides(
+        slides.map((s, i) => ({
+          uid: s.uid ?? `slide-${i}`,
+          index: s.index ?? i,
+          text: s.slideText ?? "",
+          label: s.label ?? "",
+        }))
+      )
+      setActiveSlideIndex(0)
+    }
 
-      onSlideIndexChange: (index) => {
-        store.setActiveSlideIndex(index)
-      },
+    ws.onSlideChange = (index) => {
+      setActiveSlideIndex(index)
+    }
 
-      onError: (msg) => {
-        toast.error("ProPresenter error", { description: msg, id: "pp-error" })
-      },
-
-      onLibraryList: (entries) => {
-        store.setLibraryEntries(entries)
-      },
-
-      onLibraryPresentation: (uid, ppSlides) => {
-        store.indexPresentation(uid, ppSlides)
-        const { libraryLoaded, libraryEntries } = useProPresenterStore.getState()
-        if (libraryLoaded) {
-          toast.success("Library indexed", {
-            id: "pp-library",
-            description: `${libraryEntries.length} song${
-              libraryEntries.length === 1 ? "" : "s"
-            } ready for autonomous matching`,
-          })
-        }
-      },
-    })
-
-    clientRef.current = client
-    client.connect()
+    ws.connect()
 
     return () => {
-      client.disconnect()
-      clientRef.current = null
+      ws.disconnect()
+      wsRef.current = null
+      setConnectionStatus("disconnected")
     }
   }, [enabled, host, port, password])
 
-  // -- Auto-push on transcript_final ----------------------------------------
-
-  useTauriEvent<{ text: string; is_final: boolean; confidence: number }>(
-    "transcript_final",
-    (payload) => {
-      if (!autoMode || !enabled) return
-      if (connectionStatus !== "connected") return
-
-      const segments = useTranscriptStore.getState().segments
-      const latest = segments[segments.length - 1]
-      if (!latest || latest.id === lastActedSegmentId.current) return
-
-      lastActedSegmentId.current = latest.id
-      pushLyric(payload.text)
-    }
-  )
-
-  // -- Push logic (3 stages) ------------------------------------------------
-
+  // -- pushLyric --------------------------------------------------------------
   const pushLyric = useCallback(
     (text: string) => {
-      const client = clientRef.current
-      if (!client || connectionStatus !== "connected") {
-        toast.warning("ProPresenter not connected", {
-          description: "Enable the ProPresenter integration in Settings.",
-          id: "pp-not-connected",
-        })
-        return
+      const ws = wsRef.current
+      if (!ws) return
+
+      const norm = normalise(text)
+      if (!norm) return
+
+      const { slides, libraryIndex: index } = useProPresenterStore.getState()
+
+      // Stage 1: active presentation
+      let best: { uid: string; index: number } | null = null
+      let bestScore = 0.45
+
+      for (const slide of slides) {
+        const score = similarity(norm, normalise(slide.text))
+        if (score > bestScore) {
+          bestScore = score
+          best = { uid: slide.uid, index: slide.index }
+        }
       }
 
-      const store = useProPresenterStore.getState()
-      const currentSlides = store.slides
+      // Stage 2: library index
+      if (!best) {
+        for (const [uid, libSlides] of Object.entries(index)) {
+          for (const slide of libSlides as PPSlide[]) {
+            const score = similarity(norm, normalise(slide.text))
+            if (score > bestScore) {
+              bestScore = score
+              best = { uid: slide.uid, index: slide.index }
+            }
+          }
+        }
+      }
 
-      // Stage 1: active presentation fast path
-      if (currentSlides.length > 0) {
-        const match = findBestSlide(text, currentSlides)
+      // Stage 3: corpus
+      if (!best) {
+        const match = findBestCorpusMatch(corpusRef.current, norm, 0.3)
         if (match) {
-          client.triggerSlide(match.slideIndex)
-          store.setLastPushed(text)
-          store.setActiveSlideIndex(match.slideIndex)
-          return
-        }
-      } else {
-        client.requestCurrentPresentation()
-        toast.info("Fetching ProPresenter slides...", { id: "pp-fetching" })
-        return
-      }
-
-      // Stage 2: full PP library index
-      const { libraryIndex, libraryEntries } = store
-      if (Object.keys(libraryIndex).length > 0) {
-        const libMatch = findBestLibraryMatch(text, libraryIndex, libraryEntries)
-        if (libMatch) {
-          client.switchPresentationAndTrigger(libMatch.uid, libMatch.slideIndex)
-          store.setLastPushed(text)
-          toast.info(`Switched to "${libMatch.name}"`, {
-            id: "pp-switch",
-            description: `Slide ${libMatch.slideIndex + 1} — ${Math.round(libMatch.score * 100)}% match`,
-          })
-          return
+          best = { uid: match.uid, index: match.index }
         }
       }
 
-      // Stage 3: Grace internal song corpus
-      const corpusIndex = corpusIndexRef.current
-      if (corpusIndex.length === 0) return
-
-      const corpusMatch = findBestCorpusMatch(text, corpusIndex)
-      if (!corpusMatch) return
-
-      // Find the PP library UID whose name most closely matches the corpus song name
-      const normCorpusName = corpusMatch.songName.toLowerCase()
-      const ppEntry = store.libraryEntries.find(
-        (e) => e.name.toLowerCase().includes(normCorpusName) ||
-               normCorpusName.includes(e.name.toLowerCase())
-      )
-
-      if (ppEntry) {
-        // We know which PP presentation this is — switch and trigger
-        client.switchPresentationAndTrigger(ppEntry.uid, corpusMatch.slideIndex)
-        store.setLastPushed(text)
-        toast.info(`Corpus match: "${corpusMatch.songName}"`, {
-          id: "pp-corpus-switch",
-          description: `${corpusMatch.label} — ${Math.round(corpusMatch.score * 100)}% match`,
-        })
-      } else {
-        // Song is in the Grace corpus but not found in PP library by name —
-        // alert the operator so they can manually load it
-        toast.warning(`Load "${corpusMatch.songName}" in ProPresenter`, {
-          id: "pp-load-prompt",
-          description: `Grace matched this song but it isn't open in ProPresenter.`,
-          duration: 8000,
-        })
+      if (best) {
+        ws.triggerSlide(best.uid, best.index)
+        setLastPushed(text)
       }
     },
-    [connectionStatus]
+    [setLastPushed]
   )
 
+  // -- refreshSlides ----------------------------------------------------------
   const refreshSlides = useCallback(() => {
-    clientRef.current?.requestCurrentPresentation()
+    wsRef.current?.refreshPresentation()
   }, [])
 
-  return {
-    connectionStatus,
-    pushLyric,
-    refreshSlides,
-    slides,
-  }
+  // -- Auto-push on transcript ------------------------------------------------
+  useEffect(() => {
+    if (!autoMode || !lastTranscript) return
+    pushLyric(lastTranscript)
+  }, [lastTranscript, autoMode, pushLyric])
+
+  return { pushLyric, refreshSlides }
 }

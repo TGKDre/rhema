@@ -676,9 +676,45 @@ fn run_semantic_detection(app: &AppHandle, transcript: &str) {
     log::info!("[DET-SEMANTIC] Total: {:?}", t0.elapsed());
 }
 
+/// Attempt an auto-advance on the connected ProPresenter client.
+///
+/// Called from `check_reading_mode` whenever a `ReadingAdvance` fires and
+/// `AppState::auto_advance_enabled` is `true`. Runs inside `spawn_blocking`
+/// so `block_in_place` is safe here.
+fn try_pp_auto_advance(app: &AppHandle) {
+    let managed: State<'_, Mutex<AppState>> = app.state();
+    // Use try_lock so we never stall the detection worker on a slow PP client.
+    let Ok(app_state) = managed.try_lock() else {
+        log::warn!("[PP7] Auto-advance: AppState busy — skipping this advance");
+        return;
+    };
+
+    if !app_state.auto_advance_enabled {
+        return;
+    }
+
+    let Some(client) = app_state.propresenter.as_ref() else {
+        log::warn!("[PP7] Auto-advance: no PP client connected — skipping");
+        return;
+    };
+
+    // We hold the Mutex across block_in_place intentionally: trigger_next is
+    // a single WS send (~<1ms) so the hold time is negligible.
+    match tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(client.trigger_next())
+    }) {
+        Ok(()) => log::info!("[PP7] Auto-advance: trigger_next OK"),
+        Err(e) => log::warn!("[PP7] Auto-advance: trigger_next failed: {e}"),
+    }
+}
+
 /// Check reading mode: if active, test transcript against expected verse.
 /// If direct detection just found a new verse, start/restart reading mode.
 /// Returns `true` when reading mode handled the transcript (suppresses semantic).
+///
+/// When `AppState::auto_advance_enabled` is set and a PP client is connected,
+/// every `ReadingAdvance` produced by `rm.check_transcript` or a chapter-nav
+/// command also calls `try_pp_auto_advance` to move PP to the next slide.
 #[expect(clippy::too_many_lines, reason = "sequential state-machine logic is clearer in one flow")]
 fn check_reading_mode(app: &AppHandle, transcript: &str, direct_found: bool) -> bool {
     use rhema_detection::ReadingMode;
@@ -851,6 +887,9 @@ fn check_reading_mode(app: &AppHandle, transcript: &str, direct_found: bool) -> 
                     };
                     let _ = app.emit("reading_mode_verse", &advance);
 
+                    // ── Auto-advance PP on chapter-nav ─────────────────────────────
+                    try_pp_auto_advance(app);
+
                     return true;
                 }
             }
@@ -870,6 +909,10 @@ fn check_reading_mode(app: &AppHandle, transcript: &str, direct_found: bool) -> 
 
     if let Some(advance) = advance {
         let _ = app.emit("reading_mode_verse", &advance);
+
+        // ── Auto-advance PP on lyric match ─────────────────────────────────
+        try_pp_auto_advance(app);
+
         return true;
     }
 
@@ -929,4 +972,3 @@ pub fn stop_transcription(
     log::info!("Transcription stop requested");
     Ok(())
 }
-
