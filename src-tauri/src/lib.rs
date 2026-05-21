@@ -29,8 +29,6 @@ pub fn run() {
         .manage(Mutex::new(rhema_detection::ReadingMode::new()))
         .manage(Mutex::new(commands::remote::OscRuntime::new()))
         .manage(Mutex::new(commands::remote::HttpRuntime::new()))
-        // ProPresenter client — starts disconnected; call pp_connect from the UI
-        .manage(Mutex::new(rhema_propresenter::ProPresenterClient::disconnected()))
         .invoke_handler(tauri::generate_handler![
             commands::bible::list_translations,
             commands::bible::list_books,
